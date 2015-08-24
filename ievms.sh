@@ -6,10 +6,10 @@ set -o errtrace
 set -o errexit
 set -o pipefail
 
-# ## Global Variables
+# ## Gobal Variables
 
 # The ievms version.
-ievms_version="0.3.1"
+ievms_version="0.2.1"
 
 # Options passed to each `curl` command.
 curl_opts=${CURL_OPTS:-""}
@@ -35,7 +35,7 @@ guest_pass="Passw0rd!"
 # ## Utilities
 
 # Print a message to the console.
-log()  { printf '%s\n' "$*" ; return $? ; }
+log()  { printf "$*\n" ; return $? ; }
 
 # Print an error message to the console and bail out of the script.
 fail() { log "\nERROR: $*\n" ; exit 1 ; }
@@ -257,20 +257,22 @@ start_vm() {
     VBoxManage startvm "${1}" --type headless
 }
 
-# Copy a file to the virtual machine from the ievms home folder.
+# Copy a file to the virtual machine. An optional password will be used
+# if given.
 copy_to_vm() {
     log "Copying ${2} to ${3}"
-    guest_control_exec "${1}" cmd.exe /c copy "E:\\${2}" "${3}"
+    VBoxManage guestcontrol "${1}" cp "${ievms_home}/${2}" "${3}" \
+        --username "${guest_user}" --password "${guest_pass}"
 }
 
 # Execute a command with arguments on a virtual machine.
 guest_control_exec() {
     local vm="${1}"
     local image="${2}"
-    shift
-    VBoxManage guestcontrol "${vm}" run \
+    shift; shift
+    VBoxManage guestcontrol "${vm}" exec --image "${image}" \
         --username "${guest_user}" --password "${guest_pass}" \
-        --exe "${image}" -- "$@"
+        --wait-exit -- "$@"
 }
 
 # Start an XP virtual machine and set the password for the guest user.
@@ -279,19 +281,19 @@ set_xp_password() {
     wait_for_guestcontrol "${1}"
 
     log "Setting ${guest_user} password"
-    VBoxManage guestcontrol "${1}" run --username Administrator \
-        --password "${guest_pass}" --exe "net.exe" -- \
-        net.exe user "${guest_user}" "${guest_pass}"
+    VBoxManage guestcontrol "${1}" exec --image "net.exe" --username \
+        Administrator --password "${guest_pass}" --wait-exit -- \
+        user "${guest_user}" "${guest_pass}"
 
     log "Setting auto logon password"
-    VBoxManage guestcontrol "${1}" run --username Administrator \
-        --password "${guest_pass}" --exe "reg.exe" -- reg.exe add \
+    VBoxManage guestcontrol "${1}" exec --image "reg.exe" --username \
+        Administrator --password "${guest_pass}" --wait-exit -- add \
         "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon" \
         /f /v DefaultPassword /t REG_SZ /d "${guest_pass}"
 
     log "Enabling auto admin logon"
-    VBoxManage guestcontrol "${1}" run --username Administrator \
-        --password "${guest_pass}" --exe "reg.exe" -- reg.exe add \
+    VBoxManage guestcontrol "${1}" exec --image "reg.exe" --username \
+        Administrator --password "${guest_pass}" --wait-exit -- add \
         "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon" \
         /f /v AutoAdminLogon /t REG_SZ /d 1
 }
@@ -307,7 +309,7 @@ shutdown_xp() {
 # installer, copies it to the vm, then runs it before shutting down.
 install_ie_xp() { # vm url md5
     local src=`basename "${2}"`
-    local dest="C:\\Documents and Settings\\${guest_user}\\Desktop\\${src}"
+    local dest="/Documents and Settings/${guest_user}/Desktop/${src}"
 
     download "${src}" "${2}" "${src}" "${3}"
     copy_to_vm "${1}" "${src}" "${dest}"
@@ -322,7 +324,7 @@ install_ie_xp() { # vm url md5
 # installer, copies it to the vm, then runs it before shutting down.
 install_ie_win7() { # vm url md5
     local src=`basename "${2}"`
-    local dest="C:\\Users\\${guest_user}\\Desktop\\${src}"
+    local dest="/Users/${guest_user}/Desktop/${src}"
 
     download "${src}" "${2}" "${src}" "${3}"
     start_vm "${1}"
@@ -343,8 +345,6 @@ install_ie_win7() { # vm url md5
 build_ievm() {
     unset archive
     unset unit
-    local prefix="IE"
-    local version="${1}"
     case $1 in
         6|7|8)
             os="WinXP"
@@ -369,28 +369,15 @@ build_ievm() {
                 archive="IE9_Win7.zip"
             fi
             ;;
-        EDGE)
-            prefix="MS"
-            version="Edge"
-            os="Win10"
-            unit="8"
-            ;;
         *) fail "Invalid IE version: ${1}" ;;
     esac
 
-    local vm="${prefix}${version} - ${os}"
+    local vm="IE${1} - ${os}"
     local def_archive="${vm/ - /_}.zip"
     archive=${archive:-$def_archive}
     unit=${unit:-"11"}
     local ova=`basename "${archive/_/ - }" .zip`.ova
-
-    local url
-    if [ "${os}" == "Win10" ]
-    then
-        url="https://az792536.vo.msecnd.net/vms/VMBuild_20150801/VirtualBox/MSEdge/Mac/Microsoft%20Edge.Win10.For.Mac.VirtualBox.zip"
-    else
-        url="http://virtualization.modern.ie/vhd/IEKitV1_Final/VirtualBox/OSX/${archive}"
-    fi
+    local url="http://virtualization.modern.ie/vhd/IEKitV1_Final/VirtualBox/OSX/${archive}"
 
     local md5
     case $archive in
@@ -399,7 +386,6 @@ build_ievm() {
         IE8_Win7.zip) md5="21b0aad3d66dac7f88635aa2318a3a55" ;;
         IE9_Win7.zip) md5="58d201fe7dc7e890ad645412264f2a2c" ;;
         IE10_Win8.zip) md5="cc4e2f4b195e1b1e24e2ce6c7a6f149c" ;;
-        MSEdge_Win10.zip) md5="c1011b491d49539975fb4c3eeff16dae" ;;
     esac
     
     log "Checking for existing OVA at ${ievms_home}/${ova}"
@@ -417,10 +403,6 @@ build_ievm() {
         local disk_path="${ievms_home}/${vm}-disk1.vmdk"
         log "Creating ${vm} VM (disk: ${disk_path})"
         VBoxManage import "${ova}" --vsys 0 --vmname "${vm}" --unit "${unit}" --disk "${disk_path}"
-
-        log "Adding shared folder"
-        VBoxManage sharedfolder add "${vm}" --automount --name ievms \
-            --hostpath "${ievms_home}"
 
         log "Building ${vm} VM"
         declare -F "build_ievm_ie${1}" && "build_ievm_ie${1}"
@@ -493,10 +475,10 @@ check_ext_pack
 check_unar
 
 # Install each requested virtual machine sequentially.
-all_versions="6 7 8 9 10 11 EDGE"
+all_versions="6 7 8 9 10 11"
 for ver in ${IEVMS_VERSIONS:-$all_versions}
 do
-    log "Building IE ${ver} VM"
+    log "Building IE${ver} VM"
     build_ievm $ver
 done
 
